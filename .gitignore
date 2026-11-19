@@ -1,0 +1,35 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+electricity_forecast/dbt/profiles.yml
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# Generated files and local data
+electricity_forecast/data/**
+electricity_forecast/artifacts/**
+electricity_forecast/logs/**
+!**/.gitkeep
+*.log
+
+# dbt
+electricity_forecast/dbt/target/
+electricity_forecast/dbt/dbt_packages/
+electricity_forecast/dbt/logs/
+
+# Operating system
+.DS_Store
+Thumbs.db
