@@ -1,0 +1,4 @@
+# PySpark is supplied by the Spark Docker image; do not install a second version.
+PyYAML==6.0.3
+python-dotenv==1.2.2
+psycopg[binary]==3.2.9

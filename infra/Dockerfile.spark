@@ -1,0 +1,26 @@
+FROM spark:4.1.3-python3
+USER root
+WORKDIR /app
+COPY requirements.txt /app/requirements.txt
+RUN python3 -m pip install --no-cache-dir -r /app/requirements.txt
+# Resolve the bundled Py4J archive instead of pinning the Spark 3.x filename.
+RUN python3 -c "from pathlib import Path; lib = Path('/opt/spark/python/lib'); archives = list(lib.glob('py4j-*-src.zip')); assert len(archives) == 1, archives; (lib / 'py4j-src.zip').symlink_to(archives[0].name)"
+COPY infra/core-site.xml infra/hdfs-site.xml /opt/spark/conf/hadoop/
+COPY infra/spark-defaults.conf /opt/spark/conf/spark-defaults.conf
+COPY src/ /app/src/
+COPY configs/ /app/configs/
+COPY sql/ /app/sql/
+COPY tests/ /app/tests/
+COPY .env.example /app/.env.example
+RUN mkdir -p /app/data /app/scripts /app/reports /tmp/.ivy2 && \
+    chown -R spark:spark /app /tmp/.ivy2
+ENV PYTHONPATH=/app/src:/opt/spark/python:/opt/spark/python/lib/py4j-src.zip \
+    HADOOP_CONF_DIR=/opt/spark/conf/hadoop \
+    HADOOP_USER_NAME=root \
+    PYSPARK_PYTHON=python3 \
+    PYSPARK_DRIVER_PYTHON=python3 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+USER spark
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["python3", "-m", "electricity_forecast.cli", "--help"]

@@ -1,0 +1,123 @@
+app:
+  environment: local
+  log_level: INFO
+
+source:
+  path: data/LD2011_2014.txt # File nguồn data
+  delimiter: ";" # quy ước tách cột trong txt
+  decimal_separator: "," # quy ước số thấp phân 
+  input_unit: kW #đơn vị
+  sample_minutes: 15 # độ dài khoảng đo
+  customer_count: 50 # số lượng khạcgs hàng
+  customer_ids: [] # id nếu có
+
+demo: # Phần này là thông tin về lần chạy demo
+  date: "2013-12-31" 
+  history_days: 60 # dữ liệu cần có đê dự đoán
+  replay_days: 1 # phất dữ liệu demo trong 1 ngyaf
+  extra_actual_hours: 1 # Phát thêm 1h để lấy dữ liệu nhằm đối chiều cới dữ liều dự báo
+  replay_sleep_seconds: 5 # Khoảng nghỉ để mô phỏng mỗi 15p 
+  failure_policy: stop # lỗi thì dùng
+
+forecast:
+  first_origin: "00:00" # mốc dự báo đầu tiên. hiểu đơn giản thì đây là lúc model bắt đầu dự báo cho 1h tiếp theo ( lúc 0h sẽ dự đoán cho khoảng 1h -2h sáng)
+  origin_count: 24 # mốc dự báo
+  origin_step_minutes: 60 # khoảng  cách giữa 2 origin_count
+  target_delay_minutes: 60 # khoảng delay dự báo. mốc origin 9h -> target_start = 10h
+  target_duration_minutes: 60 # khoảng mục tiêu vd target = 10h -> 11h
+# target_start = forecast_origin + target_delay_minutes
+# target_end   = target_start + target_duration_minutes
+
+
+features: # có thể thêm các dặc trưng khác nếu muốn
+  rolling_hours: 24 # Trung  bình KW 24h trước
+  previous_day_lag_days: 1 # Công suất điện 1 ngày trước
+  previous_week_lag_days: 7 # CÔng suất điện 1 tuần trc
+  missing_policy: block_prediction # thiếu đặc trung thì ko đoán đc
+
+training: # THông tin về huấn luyện. Phần này có thể tham khảo làm ngoài bài lab 
+  warmup_days: 7
+  train_days: 39
+  validation_days: 7
+  test_days: 7
+  algorithm: gbt_regressor
+  max_iter: 20
+  max_depth: 5
+  seed: 42
+  publication_rule: report_only
+
+model:
+  version: null
+
+kafka:
+  bootstrap_servers_env: KAFKA_BOOTSTRAP_SERVERS # Tên biến môi trường chứa địa chỉ broker, không phải chính địa chỉ broker.
+  topic: electricity_readings
+  partitions: 3
+  replication_factor: 1
+  key_field: customer_id
+
+  streaming:
+    query_name: ingest # tên luồng xử lý + đường dẫn check point
+    trigger_seconds: 5 # nhịp xử lý min (vd đợt 1 xong trong 2s thì 5s mới run đợt 2, 8s mới xong thí giây thứ 9 run đợt 3  )
+    starting_offsets: #earliest ưu tiên lấy offset theo thứ tự
+    max_offsets_per_trigger: 5000 #khối lượng mess max trong 1 đợt
+    fail_on_data_loss: true # mất dữ liệu thì dừng 
+
+hdfs:
+  root_uri: hdfs://namenode:8020/electricity # gốc lưu trữ
+
+iceberg:
+  catalog: lakehouse #tên
+  database_env: ICEBERG_DATABASE 
+  user_env: ICEBERG_USER
+  password_env: ICEBERG_PASSWORD
+  tables:
+    bronze: bronze.raw_events # raw data
+    readings: silver.readings_15min # Số đo hợp lệ sau chống trùng nghiệp vụ.
+    hourly: silver.consumption_hourly # Công suất theo giờ và thông tin độ đầy đủ.
+    features: gold.forecast_features  # Đặc trưng có origin và tham chiếu snapshot.
+    quarantine: ops.quarantine_events # Bản ghi lỗi và lý do để điều tra.
+
+postgres:
+  host_env: PGHOST
+  port_env: PGPORT
+  database_env: PGDATABASE
+  user_env: PGUSER
+  password_env: PGPASSWORD
+  forecast_schema: forecast # Schema chứa predictions và actual_hourly
+  ops_schema: ops # Schema chứa lần chạy, trạng thái và thông tin đối soát.
+
+spark:
+  master_env: SPARK_MASTER_URL
+  shuffle_partitions: 8
+  driver_memory: 1g
+
+airflow:
+  base_url_env: AIRFLOW_BASE_URL
+  token_env: AIRFLOW_API_TOKEN
+  training_dag_id: electricity_training
+  forecast_dag_id: electricity_hourly_forecast
+
+dbt:
+  project_dir: dbt
+  profiles_dir: dbt
+  target: local
+
+wait:
+  readiness_timeout_seconds: 180
+  bronze_commit_timeout_seconds: 120
+  dag_timeout_seconds: 900
+  poll_seconds: 2
+
+benchmark:
+  workload: feature_job
+  repeats: 3
+  customer_counts: [50, 100, 370]
+  history_days: [30, 60]
+  producer_rates_messages_per_second: [100, 500, 1000]
+  warmup_runs: 1
+  cache_policy: no_application_cache
+  recovery_pause_seconds: 30
+  catchup_backlog_threshold: 0
+  catchup_stable_seconds: 10
+  output_dir: reports/benchmark

@@ -1,0 +1,14 @@
+.git
+.venv
+venv
+.env
+.env.*
+!.env.example
+**/__pycache__
+data
+artifacts
+logs
+reports
+report
+dbt/target
+dbt/dbt_packages

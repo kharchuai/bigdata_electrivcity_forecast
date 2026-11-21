@@ -1,0 +1,204 @@
+name: electricity-forecast
+
+x-app-environment: &app-environment
+  PGHOST: ${PGHOST:-postgres}
+  PGPORT: ${PGPORT:-5432}
+  PGDATABASE: ${PGDATABASE:-electricity}
+  PGUSER: ${PGUSER:-electricity}
+  PGPASSWORD: ${PGPASSWORD:?Copy .env.example to .env first}
+  ICEBERG_DATABASE: ${ICEBERG_DATABASE:-iceberg_catalog}
+  ICEBERG_USER: ${ICEBERG_USER:-electricity}
+  ICEBERG_PASSWORD: ${ICEBERG_PASSWORD:?Set ICEBERG_PASSWORD in .env}
+  HDFS_ROOT_URI: ${HDFS_ROOT_URI:-hdfs://namenode:8020/electricity}
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  KAFKA_TOPIC: ${KAFKA_TOPIC:-electricity_readings}
+  KAFKA_PARTITIONS: ${KAFKA_PARTITIONS:-3}
+  KAFKA_REPLICATION_FACTOR: ${KAFKA_REPLICATION_FACTOR:-1}
+  SPARK_MASTER_URL: ${SPARK_MASTER_URL:-local[2]}
+  HADOOP_USER_NAME: root
+
+x-spark: &spark
+  image: electricity-spark:4.1.3
+  environment: *app-environment
+  volumes:
+    - ./configs:/app/configs:ro
+    - ivy-cache:/tmp/.ivy2
+  networks: [pipeline]
+
+x-hadoop: &hadoop
+  image: de-labs/hadoop:3.4.3
+  # Built by the course labs; this image is not pulled from Docker Hub.
+  pull_policy: never
+  networks: [pipeline]
+
+services:
+  postgres:
+    image: postgres:18.6
+    environment:
+      POSTGRES_DB: ${PGDATABASE:-electricity}
+      POSTGRES_USER: ${PGUSER:-electricity}
+      POSTGRES_PASSWORD: ${PGPASSWORD:?Copy .env.example to .env first}
+      ICEBERG_DATABASE: ${ICEBERG_DATABASE:-iceberg_catalog}
+      ICEBERG_USER: ${ICEBERG_USER:-electricity}
+      ICEBERG_PASSWORD: ${ICEBERG_PASSWORD:?Set ICEBERG_PASSWORD in .env}
+    volumes:
+      - postgres18-data:/var/lib/postgresql
+      - ./infra/postgres-init.sh:/docker-entrypoint-initdb.d/010-catalog.sh:ro
+    ports: ["127.0.0.1:${PG_PUBLISHED_PORT:-55432}:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 20s
+    networks: [pipeline]
+
+  namenode:
+    <<: *hadoop
+    hostname: namenode
+    command: ["namenode"]
+    environment:
+      HDFS_NAMENODE_OPTS: -Xmx384m
+    volumes:
+      - ./infra/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./infra/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+      - namenode-data:/hadoop/dfs/name
+    ports: ["127.0.0.1:${HDFS_UI_PORT:-9870}:9870"]
+    healthcheck:
+      test: ["CMD-SHELL", "hdfs dfs -ls / >/dev/null"]
+      interval: 10s
+      timeout: 8s
+      retries: 24
+      start_period: 20s
+
+  datanode:
+    <<: *hadoop
+    hostname: datanode
+    command: ["datanode"]
+    environment:
+      HDFS_DATANODE_OPTS: -Xmx256m
+    depends_on:
+      namenode: {condition: service_healthy}
+    volumes:
+      - ./infra/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./infra/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+      - datanode-data:/hadoop/dfs/data
+    healthcheck:
+      test: ["CMD-SHELL", "hdfs dfsadmin -report | grep -q 'Live datanodes (1):' && hdfs dfsadmin -safemode get | grep -q 'OFF'"]
+      interval: 10s
+      timeout: 8s
+      retries: 24
+      start_period: 20s
+
+  hdfs-init:
+    <<: *hadoop
+    entrypoint: ["/bin/bash", "-c"]
+    environment:
+      HDFS_ROOT_URI: ${HDFS_ROOT_URI:-hdfs://namenode:8020/electricity}
+    command:
+      - |
+        set -euo pipefail
+        for directory in source warehouse models checkpoints spark-events; do
+          hdfs dfs -mkdir -p "$${HDFS_ROOT_URI}/$${directory}"
+        done
+        hdfs dfs -ls "$${HDFS_ROOT_URI}"
+    depends_on:
+      datanode: {condition: service_healthy}
+    volumes:
+      - ./infra/core-site.xml:/opt/hadoop/etc/hadoop/core-site.xml:ro
+      - ./infra/hdfs-site.xml:/opt/hadoop/etc/hadoop/hdfs-site.xml:ro
+    restart: "no"
+
+  kafka:
+    image: apache/kafka:4.3.1
+    hostname: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:19092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:19092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID:-4L6g3nShT-eMCtK--X86sw}
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+    volumes: ["kafka-data:/var/lib/kafka/data"]
+    ports: ["127.0.0.1:19092:19092"]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null"]
+      interval: 10s
+      timeout: 8s
+      retries: 24
+      start_period: 30s
+    networks: [pipeline]
+
+  kafka-init:
+    image: apache/kafka:4.3.1
+    entrypoint: ["/bin/bash", "-c"]
+    environment:
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-electricity_readings}
+      KAFKA_PARTITIONS: ${KAFKA_PARTITIONS:-3}
+      KAFKA_REPLICATION_FACTOR: ${KAFKA_REPLICATION_FACTOR:-1}
+    command:
+      - |
+        set -euo pipefail
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+          --create --if-not-exists --topic "$${KAFKA_TOPIC}" \
+          --partitions "$${KAFKA_PARTITIONS}" --replication-factor "$${KAFKA_REPLICATION_FACTOR}"
+        description=$$(/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --describe --topic "$${KAFKA_TOPIC}")
+        printf '%s\n' "$${description}"
+        printf '%s\n' "$${description}" | grep -Eq "PartitionCount:[[:space:]]*$${KAFKA_PARTITIONS}([[:space:]]|$$)"
+        printf '%s\n' "$${description}" | grep -Eq "ReplicationFactor:[[:space:]]*$${KAFKA_REPLICATION_FACTOR}([[:space:]]|$$)"
+    depends_on:
+      kafka: {condition: service_healthy}
+    restart: "no"
+    networks: [pipeline]
+
+  spark:
+    <<: *spark
+    build:
+      context: .
+      dockerfile: infra/Dockerfile.spark
+    command: ["sleep", "infinity"]
+    ports: ["127.0.0.1:${SPARK_UI_PORT:-4040}:4040"]
+    depends_on:
+      init: {condition: service_completed_successfully}
+
+  init:
+    <<: *spark
+    command: ["python3", "-m", "electricity_forecast.cli", "init", "--config", "configs/local.yaml"]
+    restart: "no"
+    depends_on:
+      postgres: {condition: service_healthy}
+      hdfs-init: {condition: service_completed_successfully}
+      kafka-init: {condition: service_completed_successfully}
+
+  runner:
+    <<: *spark
+    profiles: [tools]
+    command: ["python3", "-m", "electricity_forecast.cli", "--help"]
+    volumes:
+      - ./configs:/app/configs:ro
+      - ./scripts:/app/scripts:ro
+      - ./data:/app/data:ro
+      - ./reports:/app/reports
+      - ivy-cache:/tmp/.ivy2
+    depends_on:
+      init: {condition: service_completed_successfully}
+
+networks:
+  pipeline:
+
+volumes:
+  postgres18-data:
+  namenode-data:
+  datanode-data:
+  kafka-data:
+  ivy-cache:
